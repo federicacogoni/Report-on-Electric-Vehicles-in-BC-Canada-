@@ -1,0 +1,456 @@
+---
+title: "Report on electric vehicles stations in the Province of British Columbia"
+author: "Federica Cogoni"
+output:
+  prettydoc::html_pretty:
+    theme: tactile
+    highlight: github
+---
+
+## Introduction
+
+Electric fuel stations, also known as electric vehicle (EV) charging stations, are becoming increasingly popular in British Columbia (B.C.), as the demand for sustainable and eco-friendly transportation grows. 
+B.C. province commits to increasing the zero-emission vehicle standard for light-duty vehicles to between 80% and 100% by 2030 (Clean B.C. Roadmap 2030).
+
+
+```{r fig.width=6, fig.height=6, fig.align='center', echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+##libraries required for this project loaded at the beginning
+library(httr)
+library(stringr)
+library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(jsonlite)
+library(rjson)
+library(sf)
+library(rgdal)
+library(tmap)
+library(stringr)
+library(tidyr)
+library(leaflet)
+library(leaflet.providers)
+library(kableExtra)
+library(knitr)
+library(ggplot2)
+library(ggthemes)
+
+## retrieve data and save the base URL
+base_dev_url <- "https://developer.nrel.gov/api/alt-fuel-stations/v1.json?limit=1&api_key="
+# Read the API key from a separate text file (check README file)
+api_key <- readLines("apikey.txt")
+info_url <- "&status=E%2CP&access=public&fuel_type=ELEC&ev_charging_level=2%2Cdc_fast&ev_network=all&owner_type=all&ev_connector_type=all&card_accepted=all&state=BC&country=CA&limit=all"
+## merge previous lines to form the url 
+full_url <- base::paste0(base_dev_url, api_key, info_url)
+
+###call api
+api_call <- httr::GET(full_url)
+###convert response to usable data 
+api_char <- base::rawToChar(api_call$content)
+#api_char ##it's how to get the URL
+api_JSON <- jsonlite::fromJSON(api_char, flatten = TRUE) #command to turn the data into a df
+#json file into dataframe
+j_df <- as.data.frame(api_JSON)
+
+
+# create a list to extract the columns according to the assignment instructions on page 2
+list_of_col <- c("fuel_stations.access_code","fuel_stations.access_days_time","fuel_stations.fuel_type_code","fuel_stations.owner_type_code","fuel_stations.ev_level2_evse_num",
+                 "fuel_stations.ev_pricing","fuel_stations.ev_level1_evse_num","fuel_stations.ev_dc_fast_num","fuel_stations.cards_accepted",
+                 "fuel_stations.city","fuel_stations.restricted_access","fuel_stations.state","fuel_stations.country","fuel_stations.longitude","fuel_stations.latitude",
+                 "fuel_stations.station_name","fuel_stations.ev_network","fuel_stations.ev_network_web","fuel_stations.ev_connector_types","fuel_stations.ev_network_ids.posts",
+                 "fuel_stations.ev_network_ids.station","fuel_stations.street_address", "fuel_stations.id","fuel_stations.zip","fuel_stations.facility_type")
+
+#Select and rename columns
+elec <- j_df %>% 
+  select(list_of_col)
+#Remove "fuel_stations" from column names and clean text 
+new_names <- sub("fuel_stations\\.", "", list_of_col)
+colnames(elec) <- new_names
+
+
+#Select the total number of stations from the dataframe to show the total number of stations
+stations_n <- nrow(elec)
+
+#Select the the charging ports: dc fast and level 2 from dataframe
+tot_stations_ports <- elec%>%
+  mutate_all(funs(replace_na(.,0)))%>%
+  select(ev_level2_evse_num, ev_dc_fast_num)%>%
+  summarise_all(funs(sum))%>% #sum of all stations
+  mutate(total_types = sum(ev_level2_evse_num, ev_dc_fast_num))%>%
+  rename(level2 = ev_level2_evse_num, dc_fast = ev_dc_fast_num)
+
+#Select the names of the networking operators in BC
+list_operators <- unique(elec$ev_network)
+
+```
+
+## Summary of data 
+
+As of March 2023, there are 1779 public charging stations in BC, like indicated below.
+
+
+```{r, fig.width=6, fig.fullwidth=TRUE, echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+#Show total stations ports with kable rendering 
+kable(stations_n, digits = 1, format.args = list(big.mark = ","))
+```
+
+
+The stations above are retrieved by type of charge. The table below shows stations that support DC fast and level 2 charging type ports. There are currently 4662 ports, 3551 of which are level 2 charging, and 1111 support direct current (DC) charge types. 
+Level 2 stations types can deliver 12 range per hour (RPH) for cars with 3.7 kW on board chargers, or 25 RPH for cars with 6.6 kW on-board charger. Level 2 charge requires 3.5 hours for an 80-mile battery, and 8 hours for a 200-mile battery. 
+DC fast chargers convert alternative current (AC) power to DC. 
+DC fast charging can deliver 100 RPH or more, charging some EVs to 80 percent in 20-30 minutes. 
+
+
+```{r, fig.width=6, fig.fullwidth=TRUE, echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+#Show total stations charging ports
+kable(tot_stations_ports, caption  = "Total station ports",  digits = 1, format.args = list(big.mark = ","))
+```
+
+
+These charging stations are operated by a variety of companies like BC Hydro, Tesla, Flo, etc. Below, there is the comprehensive list of operators.
+
+```{r, fig.width=6, fig.fullwidth=TRUE, echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+# Show total list of operators in BC 
+kable(list_operators, caption = "List of operators")
+```
+
+
+
+## Stations dispersion across BC
+
+Most of the EV charging stations are located in urban centers such as Vancouver, Victoria, and Burnaby.
+
+
+```{r fig.width=6, fig.height=6, fig.align='center', echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+
+## Stations by city 
+
+#function to fix all cities names 
+to_title_case <- function(x){
+  words <- strsplit(x, " ")[[1]]
+  words <- sapply(words,function(word){
+    paste(toupper(substring(word,1,1)), tolower(substring(word, 2)), sep = "")
+  })
+  title_case <- paste(words, collapse = " ")
+  return(title_case)
+}
+
+#apply function to column containing city names
+elec$city <- sapply(elec$city, to_title_case)  
+
+#1. Bc locations and EV ports 
+#Subset the dataframe to show BC locations with their respective number of ports
+df_city <- elec%>%
+  mutate_all(funs(replace_na(.,0)))%>% #this removes not available values
+  select(ev_level2_evse_num, ev_level1_evse_num, ev_dc_fast_num, city)%>%
+  group_by(city)%>%
+  summarise(sum_of_stations=sum(ev_level2_evse_num, ev_level1_evse_num, ev_dc_fast_num))%>%
+  arrange(desc(sum_of_stations))
+
+#2.Show charging ports by city in a histogram  
+#preparing the dataset to create a histogram with  the results in a histogram
+s_city <- df_city%>%
+  filter(sum_of_stations>80)
+# graph creation
+p <- ggplot()+
+  geom_col(data=s_city,aes(x=city, y=sum_of_stations, fill = "city"))+
+  scale_x_discrete(guide = guide_axis(n.dodge=3))+
+xlab("City")+
+  ylab("Electric Stations")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  theme(plot.title = element_text(color="black", size=14, face="bold"),
+        axis.title.x = element_text(color="black", size=10, face="bold"), 
+        axis.title.y = element_text(color= "#993333", size=10, face= "bold"),
+        legend.position = "none")
+
+
+#3. Create a map that contains both dc fast ports and level 2 ports 
+
+#subset the dataframe
+stations <- elec %>%
+  select(ev_level1_evse_num, ev_level2_evse_num, ev_dc_fast_num, city, longitude, latitude)%>%
+  rename(level1=ev_level1_evse_num, level2=ev_level2_evse_num, dc_fast=ev_dc_fast_num)
+
+# select only dc fast observations and locations
+stations_dc_fast <- stations %>%
+  select(dc_fast, city, longitude, latitude)%>%
+  na.omit()
+
+# select only level 2 observations and locations
+stations_level_2 <- stations %>%
+  select(level2, city, longitude, latitude)%>%
+  na.omit()
+#
+#plot map
+#map with the stations
+map <- leaflet() %>% 
+  addProviderTiles(providers$CartoDB.Voyager)%>% #incorporates the map
+  addCircleMarkers(lng=stations_level_2$longitude, lat=stations_level_2$latitude,label = stations_level_2$level2, group = "level2: in blue", color = "Blue", stroke = F,radius = 3, opacity = .2) %>%
+  addCircleMarkers(lng=stations_dc_fast$longitude, lat=stations_dc_fast$latitude,label = stations_dc_fast$dc_fast, group = "DC fast: in red",color = "Red", stroke = F, radius = 5, opacity = .2) %>%
+  addLayersControl(
+    overlayGroups = c("DC fast: in red", "level2: in blue"),
+    options = layersControlOptions(collapsed = FALSE)
+  )%>%
+  setView(lat=53.9171, lng=-122.7497, zoom=5.4)%>% # set on Prince George - central in BC for better visualization
+  addEasyButton(easyButton(
+    icon="fa-map-marker", title="Zoom out",
+    onClick=JS("function(btn, map){ map.setZoom(1); }")))
+#
+
+```
+
+
+
+
+```{r, fig.width=10, fig.fullwidth=TRUE, echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+#plot
+
+kable(head(df_city), caption = "BC locations with the highest number of stations")
+```
+
+
+Below, the histogram shows the six cities with the highest number of stations with level 2 and DC fast charge types. 
+
+
+```{r, fig.width=10, fig.fullwidth=TRUE, echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+#plot
+
+p
+```
+
+
+The map below shows the dispersion of the stations with DC level charge type and level 2 charge type across the province. Each dot represents one station with a numeric value that shows the number of EV charger ports. Red dots indicate DC fast ports, and blue dots indicate level 2 ports charger types. Stations are mostly located around the cities of Vancouver, Burnaby, and Victoria, and in the lower part of the province. Moving towards the north of the province, stations decrease in number as the colors dissipate.
+```{r, fig.width=10, fig.fullwidth=TRUE, echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+#map
+
+map
+```
+
+One of the challenges facing the expansion of electric fuel stations in B.C. is the lack of charging infrastructure in remote and rural areas. This means that many EV owners in these regions must rely on home charging or destination charging, which can limit their range and accessibility.
+The provincial government has recognized this challenge and has committed to investing in charging infrastructure to support the adoption of electric vehicles across the province. 
+
+B.C. is set to complete B.C.’s Electric Highway by 2024 and target having 10,000 public EV charging stations by 2030. 
+
+
+
+
+## Diversity of charging types
+
+Another challenge facing the expansion of electric fuel stations in B.C. is the diversity of charging networks and charging standards. While most public charging stations offer Level 2 charging, which can provide up to 30 miles of range per hour of charging, there are also Level 3 charging stations, also known as DC fast charging, which can provide up to 80% charge in as little as 30 minutes. However, not all EVs are compatible with all types of charging stations, which can cause confusion for EV users and make it challenging to find a charging station that is compatible with their vehicle.
+Below, the table shows the availability of two charges type in nine cities. DC fast types of connectors are lower in number compared to level 2 charging types and are mostly located in big cities. 
+
+
+```{r fig.width=6, fig.height=6, fig.align='center', echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+# Here, I select the charge types by city
+s_2stations <- elec%>%
+  mutate_all(funs(replace_na(.,0)))%>%
+  select(ev_level2_evse_num, ev_dc_fast_num,city)%>%
+  group_by(city)%>%
+  summarise(sum_dc_fast=sum(ev_dc_fast_num), sum_level_2= sum(ev_level2_evse_num))%>%
+  rename(dc_fast = sum_dc_fast, level2=sum_level_2)%>%
+  filter(level2>70)%>%
+  arrange(desc(dc_fast))
+#shows 9 cities and the availability of the EV ports 
+k <- kable(head(s_2stations))
+
+```
+
+
+```{r, fig.width=10, fig.fullwidth=TRUE, echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+#kable
+k
+```
+
+
+As DC fast chargers are more available in big cities, EV users might consider driving EV within the urban areas. 
+However, as DC fast chargers decrease outside the cities, this may discourage EV users to take long distance trips.  
+
+
+
+## Prices of EV charge
+
+B.C. electric public stations can be classified on whether the electric charge is free or for purchase. 
+The table below shows that there are 120 DC fast stations with an indication on the price for the charge. 27 stations are free of charge, while 93 stations require the users to pay for charging the EV car. Because they provide more power, DC fast charging stations are more expensive to install and operate. Station owners generally pass some of these costs on to drivers, so it really does not add up to use fast charging every day.
+
+
+
+```{r fig.width=6, fig.height=6, fig.align='center', echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+
+# Here I want to classify ev ports based on their pricing
+#I am interested in looking for three characteristics: if the charging is free, if there is a parking fee, or if the charge is for purchase
+#Important to note that only 120 rows contain the information regarding the payment required for the user
+prices_dc_fast <- elec%>%
+  select(ev_dc_fast_num, ev_pricing, city)%>%
+  na.omit()# Not available values on information of the prices are omitted 
+
+
+#The column ev_pricing contains characters string, so I need to clean the text across observations
+#Here I follow this approach: I classify the price by in three categories (free, parking fee required, or for purchase)
+
+# First, I remove quotation marks
+prices_dc_fast$ev_pricing <- gsub('^"|"$', '', prices_dc_fast$ev_pricing)
+
+#Then, I select all the rows containing free, which means that the EV user does not need to pay
+prices_dc_fast$freeofcharge <- str_detect(prices_dc_fast$ev_pricing, "Free|FREE|Charging free")
+#write rows containing prices
+for (i in 1:nrow(prices_dc_fast)) {
+  if(prices_dc_fast$freeofcharge[i] == "TRUE"){
+    prices_dc_fast$free[i] <- 1
+  }
+  else{
+    prices_dc_fast$free[i] <- 0
+  }}
+
+#Similarly, I select the strings containing parking fee
+prices_dc_fast$parking_fee <- str_detect(prices_dc_fast$ev_pricing, "Free; parking fee|$0.00-$2.00/Hr Variable Parking Fee|$2.00/Hr Parking Fee|Variable parking fee|Charging free, parking fee required|Parking Fee|Parking fee|Free; parking fee required|$0.00-$2.00/Hr Variable Parking Fee")
+#parking fee
+for (i in 1:nrow(prices_dc_fast)) {
+  if(prices_dc_fast$parking_fee[i] == "TRUE"){
+    prices_dc_fast$parkingfee[i] <- 1
+  }
+  else{
+    prices_dc_fast$parkingfee[i] <- 0
+  } }
+
+#Then, I select the strings containing the prices
+for (i in 1:nrow(prices_dc_fast)) {
+  if(prices_dc_fast$freeofcharge[i] == "FALSE"& prices_dc_fast$parking_fee[i] == "FALSE"){
+    prices_dc_fast$pay[i] <- 1
+  }
+  else{
+    prices_dc_fast$pay[i] <- 0
+  } }
+
+#remove unnecessary columns
+prices_dc_fast <- prices_dc_fast%>%
+  select(-c(freeofcharge, parking_fee))
+
+
+# Count and sum of all free observations
+dc_fast_free <- prices_dc_fast%>%
+  count(free)%>%
+  rename(stations_free=n,purchase=free)
+# Count and sum of all observations for purchase  
+dc_fast_pay <- prices_dc_fast%>%
+  count(pay)%>%
+  rename(stations_pay=n, purchase = pay)
+# Count and sum all 
+dc_fast_parking <- prices_dc_fast%>%
+  count(parkingfee)#no stations with parking fee, so I won't include it later 
+
+##join the two dataframes above 
+jp <- dc_fast_free %>%
+  left_join(dc_fast_pay, by = "purchase")%>%
+  filter(purchase == 1)%>%
+  mutate(purchase =sum(stations_free, stations_pay))%>%
+  rename(dc_fast_stations = purchase, free_charge=stations_free, charge_for_purchase=stations_pay)
+
+#kable to plot the results 
+kable_dc <- kable(jp)
+
+```
+
+
+
+```{r, fig.width=10, fig.fullwidth=TRUE, echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+#kable
+kable_dc
+```
+
+The table below shows that there are 302 level 2 stations, 260 are free for the EV users, 25 require a payment, and 17 require the users to pay a parking fee.
+
+
+```{r fig.width=6, fig.height=6, fig.align='center', echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+# Similarly to the previous setp, I want to classify ev ports based on their pricing
+#I am interested in looking for three characteristics: if the charging is free, if there is a parking fee, or if the charge is for purchase
+#Important to note that only 120 rows contain the information regarding the payment required for the user
+prices_l2 <- elec%>%
+  select(ev_level2_evse_num, ev_pricing, city)%>%
+  na.omit()# Not available values on information of the prices are omitted 
+
+
+#The column ev_pricing contains characters string, so I need to clean the text across observations
+#Here I follow this approach: I classify the price by in three categories (free, parking fee required, or for purchase)
+
+# First, I remove quotation marks
+prices_l2$ev_pricing <- gsub('^"|"$', '', prices_l2$ev_pricing)
+
+#Then, I select all the rows containing free, which means that the EV user does not need to pay
+prices_l2$freeofcharge <- str_detect(prices_l2$ev_pricing, "Free|FREE|Charging free")
+#write rows containing prices
+for (i in 1:nrow(prices_l2)) {
+  if(prices_l2$freeofcharge[i] == "TRUE"){
+    prices_l2$free[i] <- 1
+  }
+  else{
+    prices_l2$free[i] <- 0
+  }}
+
+#Similarly, I select the strings containing parking fee
+prices_l2$parking_fee <- str_detect(prices_l2$ev_pricing, "Free; parking fee|$0.00-$2.00/Hr Variable Parking Fee|$2.00/Hr Parking Fee|Variable parking fee|Charging free, parking fee required|Parking Fee|Parking fee|Free; parking fee required|$0.00-$2.00/Hr Variable Parking Fee")
+#parking fee
+for (i in 1:nrow(prices_l2)) {
+  if(prices_l2$parking_fee[i] == "TRUE"){
+    prices_l2$parkingfee[i] <- 1
+  }
+  else{
+    prices_l2$parkingfee[i] <- 0
+  } }
+
+#everything else
+for (i in 1:nrow(prices_l2)) {
+  if(prices_l2$freeofcharge[i] == "FALSE"& prices_l2$parking_fee[i] == "FALSE"){
+    prices_l2$pay[i] <- 1
+  }
+  else{
+    prices_l2$pay[i] <- 0
+  } }
+
+##remove columns
+prices_l2 <- prices_l2%>%
+  select(-c(freeofcharge, parking_fee))
+
+
+##sum of free level 2
+l2_free <- prices_l2%>%
+  count(free)%>%
+  rename(stations_free=n,purchase=free)
+# sum of columns containing prices 
+l2_pay <- prices_l2%>%
+  count(pay)%>%
+  rename(stations_pay=n, purchase = pay)
+# sum of columns containing parking fee 
+level2_parking <- prices_l2%>%
+  count(parkingfee)%>%
+  rename(stations_parking = n, purchase = parkingfee)
+
+##join first two dataframes first
+jp_2 <- l2_free %>%
+  left_join(l2_pay, by = "purchase")
+#join the last dtaframe to have the three payment options merged together 
+jp_level2 <- jp_2%>%
+  left_join(level2_parking , by = "purchase")%>%
+  filter(purchase == 1)%>%
+  mutate(purchase = sum(stations_free, stations_pay, stations_parking))%>%
+  rename(total_level2=purchase, free_charge = stations_free, charge_for_purchase = stations_pay, parking_fee = stations_parking )
+
+#kable to plot the results 
+kable_lev2 <- kable(jp_level2)
+```
+
+
+```{r, fig.width=10, fig.fullwidth=TRUE, echo=FALSE, error=FALSE, message=FALSE, warning=FALSE, comment=FALSE}
+#kable
+kable_lev2
+```
+
+## Recommendations and concluding remarks
+
+The actual state of electric fuel stations in British Columbia is evolving rapidly. 
+While there are currently 1779 public charging stations in the province, the lack of charging infrastructure in remote and rural areas and the diversity of charging networks and standards remain significant challenges for B.C. province. 
+Future projects may be useful to address these challenges efficiently. One way of assessing the accessibility of the EV stations is to calculate he paths between the different types of stations with the closest facility analysis that allows to find the nearest station from any given point. The purpose of closest facility analysis is, given a set of destination locations, or facilities, and origin locations, to find the closest n facilities to each site. This will help to implement further developments of stations by determining the locations and the most adequate charging ports. If DC fast chargers were more accessible in terms of pricing and location, individuals might consider purchasing EV.
+Another challenge to address, in line with the B.C. province goal to meet net-zero emissions by 2030, is to understand the EV demand from B.C. residents. This analysis can be carried out by assessing the interest of individuals in purchasing EV by looking at interest metrics, like Google Trends. If the interest in purchasing EV will rise, then public stations need to increase accordingly.
+The provincial government's commitment to investing in charging infrastructure and promoting the adoption of electric vehicles is a positive sign that the state of electric fuel stations in B.C. will continue to improve in the years to come.
+
+
+
+
